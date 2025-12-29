@@ -3,18 +3,20 @@ import pandas as pd
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# --- AYARLAR ---
-st.set_page_config(page_title="Canlı Bütçe Takip", page_icon="💰", layout="wide")
-st.title("💸 Kişisel Finans (Google Sheets Bağlantılı)")
+# --- SAYFA AYARLARI ---
+st.set_page_config(page_title="Canlı Bütçe", page_icon="💰", layout="wide")
 
 # --- GOOGLE SHEETS BAĞLANTISI ---
-# Bu fonksiyon bağlantıyı önbelleğe alır, böylece her işlemde tekrar bağlanmaz.
 @st.cache_resource
-def tabloya_baglan():
-    # Secrets'tan verileri al
+def baglanti_kur():
+    # Secrets kontrolü
+    if "gcp_service_account" not in st.secrets:
+        st.error("Streamlit Secrets ayarları yapılmamış! Lütfen Settings -> Secrets kısmına JSON bilgilerini gir.")
+        st.stop()
+        
     secrets_dict = st.secrets["gcp_service_account"]
     
-    # JSON formatına uygun sözlük oluştur
+    # Kimlik doğrulama
     creds_dict = {
         "type": secrets_dict["type"],
         "project_id": secrets_dict["project_id"],
@@ -32,84 +34,95 @@ def tabloya_baglan():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)
     
-    # Tabloyu aç (Tablo adının Google Sheets'teki adla BİREBİR aynı olduğundan emin ol)
-    sheet = client.open("ButceVerileri").sheet1 
-    return sheet
+    # Tabloyu aç (İsim hatası olursa uyar)
+    try:
+        sheet = client.open("ButceVerileri").sheet1
+        return sheet
+    except gspread.SpreadsheetNotFound:
+        st.error("HATA: Google Sheets'te 'ButceVerileri' adında bir dosya bulunamadı. Lütfen dosya adını kontrol et.")
+        st.stop()
 
-# --- VERİLERİ ÇEK VE TEMİZLE ---
+# --- VERİ ÇEKME VE OTOMATİK DÜZELTME ---
 try:
-    sheet = tabloya_baglan()
+    sheet = baglanti_kur()
     data = sheet.get_all_records()
     df = pd.DataFrame(data)
 
-    # EĞER TABLO DOLUYSA BAŞLIKLARI TEMİZLE (Kritik Nokta Burası)
-    if not df.empty:
-        # Sütun isimlerindeki tüm boşlukları siler (Örn: "Adet " -> "Adet")
-        df.columns = df.columns.str.strip()
-
-        # Dedektif: Ekrana sütunları yazdıralım ki ne görüyor anlayalım
-        # st.write("Algılanan Sütunlar:", df.columns.tolist()) 
-
+    # Eğer tablo boşsa veya başlıklar eksikse OTOMATİK DÜZELT
+    beklenen_basliklar = ["Tur", "Isim", "Adet", "Fiyat"]
+    mevcut_basliklar = df.columns.tolist()
+    
+    # Tablo tamamen boşsa veya başlıklar yanlışsa
+    if df.empty or not all(col in mevcut_basliklar for col in beklenen_basliklar):
+        # Eğer veri yoksa başlıkları biz yazalım
+        if len(data) == 0:
+            sheet.clear() # Temizle
+            sheet.append_row(beklenen_basliklar) # Doğrusunu yaz
+            st.toast("Tablo başlıkları otomatik oluşturuldu! Sayfa yenileniyor...")
+            st.rerun() # Sayfayı yenile
+            
 except Exception as e:
-    st.error(f"Veri çekme hatası: {e}")
-    st.stop()
-
-# Eğer tablo boşsa DataFrame yapısını biz kuralım
-if df.empty:
+    st.warning(f"Bağlantı kurulurken bir pürüz çıktı ama hallediyoruz... ({e})")
+    # Kritik hata durumunda boş dataframe oluştur ki site çökmesin
     df = pd.DataFrame(columns=["Tur", "Isim", "Adet", "Fiyat"])
 
-# --- YENİ VERİ EKLEME PANELİ ---
-st.sidebar.header("➕ Yeni Varlık Ekle")
+# --- UYGULAMA ARAYÜZÜ ---
+st.title("💸 Kişisel Finans Takipçisi")
+st.markdown("---")
 
-with st.sidebar.form("ekle_form"):
-    tur = st.selectbox("Tür", ["Hisse", "Fon", "Altın/Döviz"])
-    isim = st.text_input("Varlık İsmi (Örn: TTE)")
-    adet = st.number_input("Adet", min_value=0.0, step=0.1)
-    fiyat = st.number_input("Birim Fiyat (TL)", min_value=0.0, step=0.1)
-    
-    submit = st.form_submit_button("Kaydet")
+# Yan Menü: Veri Ekleme
+with st.sidebar:
+    st.header("➕ Yeni Varlık Ekle")
+    with st.form("ekle_form", clear_on_submit=True):
+        tur = st.selectbox("Tür Seç", ["Hisse", "Fon", "Altın/Döviz", "Nakit"])
+        isim = st.text_input("Varlık Adı (Örn: TTE, Gram Altın)")
+        adet = st.number_input("Adet", min_value=0.0, step=0.01)
+        fiyat = st.number_input("Güncel Fiyat (TL)", min_value=0.0, step=0.1)
+        
+        if st.form_submit_button("Listeye Ekle"):
+            if isim and adet > 0:
+                sheet.append_row([tur, isim, adet, fiyat])
+                st.success(f"{isim} eklendi!")
+                st.rerun()
+            else:
+                st.warning("Lütfen isim ve adet giriniz.")
 
-    if submit:
-        if isim and adet > 0:
-            # Google Sheets'e yeni satır ekle
-            yeni_veri = [tur, isim, adet, fiyat]
-            sheet.append_row(yeni_veri)
-            st.success("Kaydedildi! Tablo yenileniyor...")
-            st.rerun() # Sayfayı yenile ki yeni veriyi görelim
-        else:
-            st.warning("Lütfen isim ve adet giriniz.")
-
-# --- RAKAMLARI HESAPLA ---
+# --- HESAPLAMALAR ---
 if not df.empty:
-    # Sayıları sayı formatına çevir (Bazen metin olarak gelebilir)
-    df["Adet"] = pd.to_numeric(df["Adet"])
-    df["Fiyat"] = pd.to_numeric(df["Fiyat"])
+    # Sayısal dönüşümler (Hata önleyici)
+    df["Adet"] = pd.to_numeric(df["Adet"], errors='coerce').fillna(0)
+    df["Fiyat"] = pd.to_numeric(df["Fiyat"], errors='coerce').fillna(0)
     df["Toplam"] = df["Adet"] * df["Fiyat"]
     
     toplam_varlik = df["Toplam"].sum()
     
-    # Kategori bazlı grupla
-    ozet = df.groupby("Tur")["Toplam"].sum()
+    # Kartlar
+    col1, col2, col3 = st.columns(3)
+    col1.metric("TOPLAM VARLIK", f"{toplam_varlik:,.2f} ₺")
+    
+    en_degerli = df.loc[df["Toplam"].idxmax()] if len(df) > 0 else None
+    if en_degerli is not None:
+        col2.metric("En Değerli Varlık", f"{en_degerli['Isim']}")
+        col3.metric("Değeri", f"{en_degerli['Toplam']:,.2f} ₺")
+
+    st.markdown("---")
+    
+    # Tablo ve Silme Butonları
+    st.subheader("📋 Varlıklarınız")
+    
+    # Her satırın yanına silme butonu koymak zor olduğu için seçerek silme yapalım
+    varliklar_listesi = df["Isim"].tolist()
+    if varliklar_listesi:
+        silinecek = st.selectbox("Silmek istediğin varlığı seç:", ["Seçiniz..."] + varliklar_listesi)
+        if silinecek != "Seçiniz...":
+            if st.button(f"🗑️ '{silinecek}' adlı kaydı sil"):
+                # Google Sheets'te bul ve sil (Satır numarası bulmaca)
+                cell = sheet.find(silinecek)
+                sheet.delete_rows(cell.row)
+                st.success("Silindi!")
+                st.rerun()
+
+    st.dataframe(df, use_container_width=True)
+
 else:
-    toplam_varlik = 0
-    ozet = pd.Series()
-
-# --- GÖSTERGE PANELİ ---
-col1, col2 = st.columns(2)
-col1.metric("TOPLAM VARLIK", f"{toplam_varlik:,.2f} TL")
-col2.write("Son güncellenen veriler Google Sheets'ten çekildi.")
-
-st.markdown("---")
-
-# --- DETAYLI TABLO ---
-st.subheader("📋 Varlık Listesi")
-st.dataframe(df, use_container_width=True)
-
-# --- SİLME İŞLEMİ (Opsiyonel) ---
-st.markdown("---")
-st.subheader("🗑️ Veri Temizle")
-if st.button("Tüm Verileri Sil (Dikkat!)"):
-    sheet.clear()
-    # Başlıkları tekrar ekle
-    sheet.append_row(["Tur", "Isim", "Adet", "Fiyat"])
-    st.rerun()
+    st.info("Henüz bir varlık eklemediniz. Sol menüden ekleme yapabilirsiniz.")
