@@ -4,25 +4,35 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- SAYFA AYARLARI ---
-st.set_page_config(page_title="Canlı Bütçe", page_icon="💰", layout="wide")
+st.set_page_config(page_title="Net Hesap", page_icon="🧮", layout="wide")
 
-# --- YARDIMCI FONKSİYON: VİRGÜL DÜZELTİCİ ---
-def sayiya_cevir(deger):
+# --- KESİN ÇÖZÜM FONKSİYONU ---
+def metni_sayiya_zorla(deger):
     """
-    Kullanıcı '10,5' de yazsa '10.5' de yazsa bunu doğru sayıya (float) çevirir.
-    Hatalı giriş olursa 0.0 döndürür.
+    Gelen veri ne olursa olsun (virgüllü yazı, noktalı yazı, hatalı giriş)
+    bunu mutlaka matematiksel sayıya (float) çevirir.
+    Çeviremezse 0.0 döndürür, asla hata vermez.
     """
-    if not deger:
-        return 0.0
     try:
-        # Eğer zaten sayıysa direkt döndür
+        # 1. Veri zaten sayıysa (int/float) elleme, geri gönder
         if isinstance(deger, (int, float)):
             return float(deger)
         
-        # Eğer metinse (str), önce virgülü noktaya çevir, sonra sayı yap
-        deger_str = str(deger)
-        deger_str = deger_str.replace(",", ".") # İşte sihirli değnek burası!
-        return float(deger_str)
+        # 2. Veri metinse string'e çevir
+        s = str(deger).strip()
+        
+        # 3. Virgülleri noktaya çevir (Türkiye standardını dünya standardına çevir)
+        # Örn: "4,20" -> "4.20"
+        s = s.replace(",", ".")
+        
+        # 4. İçinde sayı ve nokta harici her şeyi temizle (Örn: "100 TL" -> "100")
+        s = ''.join(c for c in s if c.isdigit() or c == '.')
+        
+        # 5. Boş kaldıysa 0 dön
+        if not s:
+            return 0.0
+            
+        return float(s)
     except:
         return 0.0
 
@@ -31,10 +41,12 @@ def sayiya_cevir(deger):
 def baglanti_kur():
     # Secrets kontrolü
     if "gcp_service_account" not in st.secrets:
-        st.error("Secrets ayarları eksik!")
+        st.error("Lütfen Streamlit Secrets ayarlarını yapınız.")
         st.stop()
         
     secrets_dict = st.secrets["gcp_service_account"]
+    
+    # Kimlik bilgileri sözlüğü oluştur
     creds_dict = {
         "type": secrets_dict["type"],
         "project_id": secrets_dict["project_id"],
@@ -55,8 +67,8 @@ def baglanti_kur():
     try:
         sheet = client.open("ButceVerileri").sheet1
         return sheet
-    except gspread.SpreadsheetNotFound:
-        st.error("Google Sheets dosyası bulunamadı.")
+    except:
+        st.error("Google Sheets dosyası bulunamadı. Adın 'ButceVerileri' olduğundan emin ol.")
         st.stop()
 
 # --- VERİ ÇEKME ---
@@ -64,76 +76,81 @@ try:
     sheet = baglanti_kur()
     data = sheet.get_all_records()
     df = pd.DataFrame(data)
-
-    # Başlık kontrolü ve otomatik düzeltme
-    beklenen_basliklar = ["Tur", "Isim", "Adet", "Fiyat"]
-    if df.empty or not all(col in df.columns for col in beklenen_basliklar):
+    
+    # Tablo boşsa veya başlıklar yoksa düzelt
+    beklenen = ["Tur", "Isim", "Adet", "Fiyat"]
+    if df.empty or not all(col in df.columns for col in beklenen):
         if len(data) == 0:
             sheet.clear()
-            sheet.append_row(beklenen_basliklar)
+            sheet.append_row(beklenen)
             st.rerun()
-
+            
 except Exception as e:
     df = pd.DataFrame(columns=["Tur", "Isim", "Adet", "Fiyat"])
 
-# --- UYGULAMA ARAYÜZÜ ---
-st.title("💸 Kişisel Finans Takipçisi")
+# --- ARAYÜZ ---
+st.title("💰 Kurşun Geçirmez Bütçe Takibi")
 st.markdown("---")
 
-# YAN MENÜ (Artık Metin Kutusu Kullanıyoruz - Virgül Serbest!)
+# YAN MENÜ
 with st.sidebar:
-    st.header("➕ Yeni Varlık Ekle")
+    st.header("➕ Ekleme Paneli")
     with st.form("ekle_form", clear_on_submit=True):
-        tur = st.selectbox("Tür Seç", ["Hisse", "Fon", "Altın/Döviz", "Nakit"])
-        isim = st.text_input("Varlık Adı (Örn: TTE, Gram Altın)")
+        tur = st.selectbox("Tür", ["Hisse", "Fon", "Altın/Döviz", "Nakit"])
+        isim = st.text_input("Varlık Adı", placeholder="Örn: TTE")
         
-        # BURASI DEĞİŞTİ: Sayı kutusu yerine yazı kutusu (text_input) koyduk
-        # Böylece virgül koysan da hata vermeyecek, biz düzelteceğiz.
-        adet_giris = st.text_input("Adet (Örn: 10 veya 10,5)", value="0")
-        fiyat_giris = st.text_input("Güncel Fiyat (TL) (Örn: 4,20)", value="0")
+        # Burası önemli: String olarak alıyoruz, aşağıda zorla sayıya çevireceğiz
+        adet_txt = st.text_input("Adet", placeholder="Örn: 1000")
+        fiyat_txt = st.text_input("Birim Fiyat", placeholder="Örn: 4,20")
         
-        if st.form_submit_button("Listeye Ekle"):
-            # Arka planda çeviriyoruz
-            adet_temiz = sayiya_cevir(adet_giris)
-            fiyat_temiz = sayiya_cevir(fiyat_giris)
+        btn = st.form_submit_button("Kaydet")
+        
+        if btn:
+            # Önce temizle ve sayıya çevir
+            temiz_adet = metni_sayiya_zorla(adet_txt)
+            temiz_fiyat = metni_sayiya_zorla(fiyat_txt)
             
-            if isim and adet_temiz > 0:
-                # Google Sheets'e düzeltilmiş (noktalı) halini kaydediyoruz
-                sheet.append_row([tur, isim, adet_temiz, fiyat_temiz])
-                st.success(f"{isim} eklendi!")
+            if isim and temiz_adet > 0:
+                # Google Sheets'e düzgün formatta (noktalı) kaydet
+                sheet.append_row([tur, isim, temiz_adet, temiz_fiyat])
+                st.success("Kaydedildi!")
                 st.rerun()
             else:
-                st.warning("Lütfen geçerli bir isim ve adet giriniz.")
+                st.warning("Lütfen geçerli değerler giriniz.")
 
-# --- HESAPLAMALAR ---
+# --- TABLO VE HESAPLAMA ---
 if not df.empty:
-    # Tablodaki eski verileri de temizleyip hesaplayalım
-    # (Google Sheets'te elle virgüllü yazılmış olsa bile düzeltir)
-    df["Adet"] = df["Adet"].apply(sayiya_cevir)
-    df["Fiyat"] = df["Fiyat"].apply(sayiya_cevir)
-    
-    df["Toplam"] = df["Adet"] * df["Fiyat"]
-    
-    toplam_varlik = df["Toplam"].sum()
-    
-    col1, col2 = st.columns(2)
-    col1.metric("TOPLAM VARLIK", f"{toplam_varlik:,.2f} ₺")
-    col2.info("Veriler otomatik olarak sayıya çevrildi.")
-
-    st.markdown("---")
     st.subheader("📋 Varlıklarınız")
     
-    # Silme Fonksiyonu
-    varliklar_listesi = df["Isim"].tolist()
-    if varliklar_listesi:
-        silinecek = st.selectbox("Silmek istediğin varlığı seç:", ["Seçiniz..."] + varliklar_listesi)
-        if silinecek != "Seçiniz...":
-            if st.button(f"🗑️ '{silinecek}' adlı kaydı sil"):
-                cell = sheet.find(silinecek)
-                sheet.delete_rows(cell.row)
-                st.success("Silindi!")
-                st.rerun()
+    # 1. ADIM: Tablodaki her şeyi sayıya zorla (Metin kalmasın!)
+    df["Adet"] = df["Adet"].apply(metni_sayiya_zorla)
+    df["Fiyat"] = df["Fiyat"].apply(metni_sayiya_zorla)
+    
+    # 2. ADIM: Matematik (Artık hata veremez, çünkü hepsi sayı)
+    df["Toplam"] = df["Adet"] * df["Fiyat"]
+    
+    genel_toplam = df["Toplam"].sum()
+    
+    # Göstergeler
+    col1, col2 = st.columns(2)
+    col1.metric("TOPLAM VARLIK", f"{genel_toplam:,.2f} ₺")
+    
+    # Silme İşlemi
+    varliklar = df["Isim"].unique().tolist()
+    silinecek = st.selectbox("Silinecek Kayıt:", ["Seçiniz..."] + varliklar)
+    
+    if silinecek != "Seçiniz...":
+        if st.button("🗑️ Sil"):
+            cell = sheet.find(silinecek)
+            sheet.delete_rows(cell.row)
+            st.success("Silindi!")
+            st.rerun()
 
     st.dataframe(df, use_container_width=True)
+
 else:
-    st.info("Listeniz boş.")
+    st.info("Tablo şu an boş.")
+    if st.button("Tabloyu Sıfırla (Başlıkları Onar)"):
+        sheet.clear()
+        sheet.append_row(["Tur", "Isim", "Adet", "Fiyat"])
+        st.rerun()
