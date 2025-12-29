@@ -36,13 +36,22 @@ def tabloya_baglan():
     sheet = client.open("ButceVerileri").sheet1 
     return sheet
 
-# Verileri Çek
+# --- VERİLERİ ÇEK VE TEMİZLE ---
 try:
     sheet = tabloya_baglan()
     data = sheet.get_all_records()
     df = pd.DataFrame(data)
+
+    # EĞER TABLO DOLUYSA BAŞLIKLARI TEMİZLE (Kritik Nokta Burası)
+    if not df.empty:
+        # Sütun isimlerindeki tüm boşlukları siler (Örn: "Adet " -> "Adet")
+        df.columns = df.columns.str.strip()
+
+        # Dedektif: Ekrana sütunları yazdıralım ki ne görüyor anlayalım
+        # st.write("Algılanan Sütunlar:", df.columns.tolist()) 
+
 except Exception as e:
-    st.error(f"Bağlantı Hatası: {e}")
+    st.error(f"Veri çekme hatası: {e}")
     st.stop()
 
 # Eğer tablo boşsa DataFrame yapısını biz kuralım
