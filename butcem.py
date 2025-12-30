@@ -3,114 +3,114 @@ import pandas as pd
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# --- SAYFA AYARLARI ---
-st.set_page_config(page_title="Net Bütçe", page_icon="💵", layout="wide")
+st.set_page_config(page_title="Net Bütçe V4", page_icon="🛡️", layout="wide")
 
-# --- GOOGLE SHEETS BAĞLANTISI ---
-@st.cache_resource
-def baglanti_kur():
-    if "gcp_service_account" not in st.secrets:
-        st.error("Secrets ayarları eksik!")
-        st.stop()
+# --- ZORLAYICI ÇEVİRİCİ MOTORU ---
+def tr_formatini_duzelt(deger):
+    """
+    Bu fonksiyon veriye acımaz. Ne gelirse gelsin sayıya çevirir.
+    Girdi: "1.500,50" -> Çıktı: 1500.50
+    Girdi: "10,5"     -> Çıktı: 10.5
+    Girdi: 100        -> Çıktı: 100.0
+    """
+    if deger == "" or pd.isna(deger):
+        return 0.0
     
+    # Zaten sayıysa (int/float) direkt döndür
+    if isinstance(deger, (int, float)):
+        return float(deger)
+    
+    # Önce metne çevirip kenar boşluklarını al
+    s = str(deger).strip()
+    
+    # 1. Adım: Binlik ayracı olan NOKTAYI sil (1.000 -> 1000)
+    s = s.replace(".", "")
+    
+    # 2. Adım: Ondalık ayracı olan VİRGÜLÜ noktaya çevir (10,5 -> 10.5)
+    s = s.replace(",", ".")
+    
+    # 3. Adım: Çevirmeyi dene
+    try:
+        return float(s)
+    except:
+        return 0.0
+
+# --- BAĞLANTI AYARLARI ---
+@st.cache_resource
+def baglan():
+    if "gcp_service_account" not in st.secrets:
+        st.error("Secrets ayarları yok!")
+        st.stop()
     secrets = st.secrets["gcp_service_account"]
-    creds_dict = {
-        "type": secrets["type"],
-        "project_id": secrets["project_id"],
-        "private_key_id": secrets["private_key_id"],
-        "private_key": secrets["private_key"],
-        "client_email": secrets["client_email"],
-        "client_id": secrets["client_id"],
-        "auth_uri": secrets["auth_uri"],
-        "token_uri": secrets["token_uri"],
-        "auth_provider_x509_cert_url": secrets["auth_provider_x509_cert_url"],
-        "client_x509_cert_url": secrets["client_x509_cert_url"]
-    }
+    
+    # JSON yapısını oluştur
+    creds_dict = {k: v for k, v in secrets.items()}
     
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)
-    
-    try:
-        return client.open("ButceVerileri").sheet1
-    except:
-        st.error("Google Sheets dosyası bulunamadı.")
-        st.stop()
+    return client.open("ButceVerileri").sheet1
 
-# --- VERİ ÇEKME ---
+# --- VERİ İŞLEME ---
 try:
-    sheet = baglanti_kur()
+    sheet = baglan()
     data = sheet.get_all_records()
     df = pd.DataFrame(data)
     
-    beklenen = ["Tur", "Isim", "Adet", "Fiyat"]
-    if df.empty or not all(col in df.columns for col in beklenen):
+    # Başlık kontrolü
+    if df.empty or "Fiyat" not in df.columns:
         if len(data) == 0:
             sheet.clear()
-            sheet.append_row(beklenen)
+            sheet.append_row(["Tur", "Isim", "Adet", "Fiyat"])
             st.rerun()
+
 except:
     df = pd.DataFrame(columns=["Tur", "Isim", "Adet", "Fiyat"])
 
 # --- ARAYÜZ ---
-st.title("💰 Kurşun Geçirmez Bütçe (V3)")
-st.caption("Virgülleri ve noktaları otomatik düzeltir.")
-st.markdown("---")
+st.title("🛡️ Bütçe Takip (Virgül Korumalı)")
+st.info("Virgül (,) kuruş için, Nokta (.) binlik ayracı için kullanılır veya yoksayılır.")
 
-# YAN MENÜ
 with st.sidebar:
-    st.header("➕ Varlık Ekle")
+    st.header("➕ Ekle")
     with st.form("ekle", clear_on_submit=True):
         tur = st.selectbox("Tür", ["Hisse", "Fon", "Altın/Döviz", "Nakit"])
-        isim = st.text_input("İsim", placeholder="Örn: TTE")
+        isim = st.text_input("İsim (Örn: TTE)")
+        # String olarak alıyoruz ki Python karışmasın
+        adet_gir = st.text_input("Adet", value="0") 
+        fiyat_gir = st.text_input("Fiyat", value="0")
         
-        # Kullanıcı buraya "10,5" veya "1.000" yazabilir, biz metin (string) olarak alacağız
-        adet_giris = st.text_input("Adet", value="0")
-        fiyat_giris = st.text_input("Fiyat", value="0")
-        
-        submitted = st.form_submit_button("Kaydet")
-        
-        if submitted:
-            if isim:
-                # Veriyi olduğu gibi (virgüllü de olsa) Sheets'e atıyoruz.
-                # Hesaplarken düzelteceğiz.
-                sheet.append_row([tur, isim, adet_giris, fiyat_giris])
-                st.success("Eklendi!")
-                st.rerun()
-
-# --- KRİTİK BÖLÜM: HESAPLAMA ---
-if not df.empty:
-    
-    # 1. ADIM: Temizlik (String -> Float Dönüşümü)
-    # Türkiye standardı: Nokta binlik (yoksay), Virgül ondalık (nokta yap)
-    # Örn: "1.000,50" -> "1000.50"
-    
-    for col in ["Adet", "Fiyat"]:
-        # Önce her şeyi string (yazı) yap
-        df[col] = df[col].astype(str)
-        # Noktaları sil (1.000 -> 1000)
-        df[col] = df[col].str.replace(".", "", regex=False)
-        # Virgülleri nokta yap (10,5 -> 10.5)
-        df[col] = df[col].str.replace(",", ".", regex=False)
-        # Sayıya çevir, çeviremezsen 0 yaz
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-
-    # 2. ADIM: Artık hepsi matematiksel sayı. Çarpabiliriz.
-    df["Toplam"] = df["Adet"] * df["Fiyat"]
-    genel_toplam = df["Toplam"].sum()
-
-    # GÖSTERGE
-    col1, col2 = st.columns(2)
-    col1.metric("TOPLAM VARLIK", f"{genel_toplam:,.2f} ₺")
-    
-    st.dataframe(df)
-    
-    # SİLME BUTONU
-    if len(df) > 0:
-        silinecek = st.selectbox("Silinecek:", ["Seçiniz..."] + df["Isim"].tolist())
-        if silinecek != "Seçiniz..." and st.button("Sil"):
-            cell = sheet.find(silinecek)
-            sheet.delete_rows(cell.row)
+        if st.form_submit_button("Kaydet"):
+            # Kaydederken hiçbir şeye dokunmadan ham haliyle gönderiyoruz
+            sheet.append_row([tur, isim, adet_gir, fiyat_gir])
+            st.success("Eklendi!")
             st.rerun()
+
+# --- HESAPLAMA MOTORU (Milyarları Engelleyen Kısım) ---
+if not df.empty:
+    # Pandas'a diyoruz ki: "Bu sütunlardaki her bir hücreyi tek tek al ve fonksiyonumdan geçir"
+    # Bu işlem, çarpma işleminden ÖNCE yapılır.
+    df["Adet_Sayi"] = df["Adet"].apply(tr_formatini_duzelt)
+    df["Fiyat_Sayi"] = df["Fiyat"].apply(tr_formatini_duzelt)
+    
+    # Artık garanti sayı olan yeni sütunları çarpıyoruz
+    df["Toplam"] = df["Adet_Sayi"] * df["Fiyat_Sayi"]
+    
+    genel_toplam = df["Toplam"].sum()
+    
+    col1, col2 = st.columns(2)
+    col1.metric("NET VARLIK", f"{genel_toplam:,.2f} ₺")
+    
+    # Tabloyu göster (Okunaklı olsun diye)
+    gosterim_df = df[["Tur", "Isim", "Adet", "Fiyat", "Toplam"]].copy()
+    gosterim_df["Toplam"] = gosterim_df["Toplam"].map('{:,.2f}'.format)
+    st.dataframe(gosterim_df, use_container_width=True)
+    
+    # Silme
+    secilen = st.selectbox("Silinecek:", ["Seçim Yap..."] + df["Isim"].unique().tolist())
+    if secilen != "Seçim Yap..." and st.button("Kaydı Sil"):
+        cell = sheet.find(secilen)
+        sheet.delete_rows(cell.row)
+        st.rerun()
 else:
-    st.info("Tablo boş.")
+    st.warning("Listeniz boş.")
